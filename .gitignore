@@ -2,12 +2,15 @@
 .venv/
 venv/
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Credentials (NEVER commit these)
 .env
 
-# Debug artifacts (may contain session data)
+# Debug artifacts (may contain session cookies and live tokens)
 debug_output/
-__pycache__/
 
 # OS files
 .DS_Store

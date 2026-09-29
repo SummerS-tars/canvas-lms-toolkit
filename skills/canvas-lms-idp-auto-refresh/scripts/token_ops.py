@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 
 from auth_session import AppConfig, FlowError, mask
 
@@ -187,38 +188,42 @@ def parse_token_id_from_url(url: str) -> str | None:
     return match.group(1)
 
 
+def rel_attr(tag: Any | None) -> str:
+    """取 <a rel="..."> 的 URL；bs4 把多值属性解析成 list。"""
+    if tag is None:
+        return ""
+    value = tag.get("rel")
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    return html.unescape(str(value or "")).strip()
+
+
 def extract_existing_tokens_from_settings(html_text: str) -> list[ExistingTokenEntry]:
-    rows = re.findall(
-        r'<tr[^>]*class="[^"]*access_token[^"]*"[^>]*>(.*?)</tr>',
-        html_text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    """解析 /profile/settings 里已有的 access token 行。
+
+    必须用 DOM 解析而不是 `<tr>...</tr>` 正则：当前 Canvas 的行内含嵌套
+    `<table class="subtable">`（过期时间/上次使用），非贪婪正则会在内层
+    `</tr>` 处截断，导致取不到位于嵌套表格之后的 delete_key_link。
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
     results: list[ExistingTokenEntry] = []
 
-    for row in rows:
-        purpose_match = re.search(
-            r'<td[^>]*class="purpose"[^>]*>(.*?)</td>',
-            row,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        delete_match = re.search(
-            r'<a[^>]*(?=[^>]*class="[^"]*delete_key_link[^"]*")(?=[^>]*rel="([^"]+)")[^>]*>',
-            row,
-            flags=re.IGNORECASE,
-        )
-        show_match = re.search(
-            r'<a[^>]*(?=[^>]*class="[^"]*show_token_link[^"]*")(?=[^>]*rel="([^"]+)")[^>]*>',
-            row,
-            flags=re.IGNORECASE,
-        )
-
-        if not purpose_match or not delete_match:
+    for row in soup.select("tr.access_token"):
+        purpose_cell = row.select_one("td.purpose")
+        delete_link = row.select_one("a.delete_key_link")
+        if purpose_cell is None or delete_link is None:
             continue
 
-        purpose_text = normalize_space(html.unescape(strip_tags(purpose_match.group(1))))
-        delete_url = html.unescape(delete_match.group(1))
-        show_url = html.unescape(show_match.group(1)) if show_match else ""
-        token_id = parse_token_id_from_url(show_url)
+        delete_url = rel_attr(delete_link)
+        # 跳过 <tr class="access_token"> 模板行（rel/purpose 里是 {{ ... }} 占位符）
+        if not delete_url or "{{" in delete_url:
+            continue
+
+        purpose_text = normalize_space(purpose_cell.get_text())
+        if not purpose_text or "{{" in purpose_text:
+            continue
+
+        token_id = parse_token_id_from_url(rel_attr(row.select_one("a.show_token_link")))
 
         results.append(
             ExistingTokenEntry(

@@ -88,6 +88,9 @@ cd scripts && .venv/bin/python elearning_login.py --dry-run --debug
 - 脚本使用 PKCS1v1_5 RSA 加密传输密码（与 IDP 的 JS 前端保持一致）
 - Token 创建时带有 purpose 标签，便于生命周期管理
 - 同 purpose 的旧 Token 可自动删除，避免 Token 堆积
+- 清理逻辑用 BeautifulSoup 按行解析 `/profile/settings`（`tr.access_token`），逐行取自己的 `delete_key_link[rel]`。**不要用 `<tr>...</tr>` 正则** —— 行内含嵌套 `<table class="subtable">`，非贪婪正则会截断，导致永远找不到删除链接。
+- 删除链接 `rel` 里的 id 段可能是**不透明串**（如 `tokens/QfGJ2`），不等于 `show_token_link[rel]` 里的数字 id —— 保留「当前 token」要用数字 id 比对，删除则用 delete 链接的 `rel`
+- `scripts/diag_settings_tokens.py` 是**只读**诊断：登录后抓 settings 页面、报告解析命中数，不创建也不删除任何东西
 
 ## 已知限制
 
@@ -110,6 +113,7 @@ cd scripts && .venv/bin/python elearning_login.py --dry-run --debug
 | `未拿到关键会话 Cookie` | 检查 `auth_execute.json` 是否有报错，`authn_engine_response.html` 是否有验证码 |
 | Token API 返回 401/422 | `debug_output/cookies.txt` 中查找 `_csrf_token` / `_normandy_session` |
 | 清理失败 | `debug_output/cleanup_summary.json` 中查找 `failed` 条目 |
+| `清理模式：未找到可删除旧 token` 但 settings 页面确实有 token | DOM 结构漂移。跑 `scripts/diag_settings_tokens.py` 只读抓页面 → `debug_output/settings_page.html`，再核对 `td.purpose` / `a.delete_key_link`。解析必须用 DOM（bs4），**不要用 `<tr>...</tr>` 正则** |
 
 ## 适配其他高校
 

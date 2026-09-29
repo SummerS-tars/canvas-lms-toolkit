@@ -1,122 +1,117 @@
-# Canvas LMS IDP Auto Token Refresh
+# Canvas LMS Toolkit
 
-Automatically refresh Canvas LMS API tokens by replaying institutional IDP (CAS/SAML) login with RSA-encrypted credentials.
+Automation toolkit for Fudan University's eLearning platform (Canvas LMS) — two companion
+[OpenClaw Skills](https://clawhub.com) covering the full **"get a token → use the token"** loop.
+
+- **Auth**: works around SSO session expiry to rotate Canvas API tokens automatically
+- **Use**: call the Canvas REST API to read assignments, download course files, submit work,
+  and sync a whole semester's course materials in one command
 
 [中文文档](README.md)
 
-## Overview
+---
 
-Many universities deploy Canvas LMS behind institutional SSO (CAS/SAML). API tokens generated through Canvas settings may be invalidated by the SSO layer on a daily or session basis. This project automates the full login chain to programmatically create fresh Canvas API tokens without manual intervention.
+## The Two Skills
 
-## How It Works
+| Skill | Purpose | Triggers on | Dependencies |
+|---|---|---|---|
+| [`canvas-lms-idp-auto-refresh`](skills/canvas-lms-idp-auto-refresh/) | **Write**: replay institutional IDP (CAS/SAML) login, RSA-encrypt the password, create/purge API tokens | token expired, 401/404, "自动刷新 token", "elearning login" | needs a venv (`requests` / `beautifulsoup4` / `pycryptodome` / `python-dotenv`) |
+| [`canvas-lms`](skills/canvas-lms/) | **Read**: Canvas API recipes + course material sync script | "查作业", "下载课件", "课程平台", "查截止日期" | **zero third-party deps** (stdlib only) |
+
+The dependency is one-way: `canvas-lms` calls the refresh script in `canvas-lms-idp-auto-refresh`
+when the token dies; the latter knows nothing about the former. Either can be used alone.
+
+## Repository Layout
 
 ```
-Entry URL → CAS/IDP (lck + authChainCode) → RSA encrypt password → authExecute
-  → loginToken (JWT) → authnEngine → SSO ticket → Canvas session → create API token
-  → (optional) delete old tokens by purpose → output NEW_TOKEN=xxx
+canvas-lms-toolkit/
+├── README.md / README.en.md
+├── LICENSE                       # MIT
+├── docs/
+│   └── project-background.md     # Fudan eLearning background & use cases (Chinese)
+└── skills/
+    ├── canvas-lms/
+    │   ├── SKILL.md
+    │   └── scripts/sync_course_materials.py
+    └── canvas-lms-idp-auto-refresh/
+        ├── SKILL.md
+        ├── references/idp-adaptation.md   # step-by-step guide for other institutions
+        └── scripts/
+            ├── elearning_login.py         # entry point
+            ├── auth_session.py            # IDP login chain
+            ├── token_ops.py               # token create / cleanup
+            ├── diag_settings_tokens.py    # read-only diagnostic
+            ├── requirements.txt
+            └── .env.example
 ```
 
 ## Quick Start
 
+### 1. Install into OpenClaw
+
+Drop the two directories under `skills/` into your skills directory
+(e.g. `~/.openclaw/workspace/skills/`) and add them to the skills allowlist —
+otherwise the model never sees them. `cp -r skills/* <your-skills-dir>/` works too.
+
+### 2. Configure credentials (only for `canvas-lms-idp-auto-refresh`)
+
 ```bash
-# 1. Create virtual environment
+cd skills/canvas-lms-idp-auto-refresh/scripts
 python3 -m venv .venv
-source .venv/bin/activate  # or: .venv\Scripts\activate (Windows)
+.venv/bin/pip install -r requirements.txt
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Configure credentials
-cp .env.example .env
-# Edit .env — fill in ELEARNING_USERNAME and ELEARNING_PASSWORD
-
-# 4. Test (dry-run — only fetches public key, no login)
-python elearning_login.py --dry-run --debug
-
-# 5. Full flow: login → create token → cleanup old tokens
-python elearning_login.py --cleanup-old-tokens
+cp .env.example .env        # fill in ELEARNING_USERNAME / ELEARNING_PASSWORD
+chmod 600 .env
 ```
 
-On success: `NEW_TOKEN=<token_value>` is printed to stdout.
+### 3. Get a token
 
-## Configuration
+```bash
+# Dry-run first: only fetches the public key, no login
+.venv/bin/python elearning_login.py --dry-run --debug
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `ELEARNING_USERNAME` | ✅ | — | Student/staff ID |
-| `ELEARNING_PASSWORD` | ✅ | — | Password |
-| `ELEARNING_ENTRY_URL` | | `https://elearning.fudan.edu.cn/login/cas` | CAS entry point |
-| `ELEARNING_IDP_BASE_URL` | | `https://id.fudan.edu.cn` | IDP base URL |
-| `ELEARNING_ENTITY_ID` | | `https://elearning.fudan.edu.cn` | Service provider entity ID |
-| `ELEARNING_TOKEN_PURPOSE` | | `OpenClaw Auto Refresh Token` | Label for created tokens |
-| `ELEARNING_CLEANUP_OLD_TOKENS` | | `0` | Auto-delete old tokens with same purpose |
-| `ELEARNING_TIMEOUT_SECONDS` | | `20` | Request timeout in seconds |
-
-## CLI Options
-
-```
---debug               Verbose HTTP logs + save debug artifacts to debug_output/
---dry-run             Only test up to public key fetch (no actual login)
---skip-token          Login but skip token creation
---cleanup-old-tokens  Delete old tokens matching purpose after creating new one
---cleanup-purpose     Override which purpose to match for cleanup
---cleanup-dry-run     Preview which tokens would be deleted without deleting
---dump-dir            Custom debug output directory (default: debug_output/)
+# Full flow: login → create token → cleanup old tokens with the same purpose
+.venv/bin/python elearning_login.py --cleanup-old-tokens
 ```
 
-## Integrating with Your Agent/Tool
+On success `NEW_TOKEN=<value>` is printed to stdout — write it to `~/.config/canvas-lms-token`.
+From then on the lazy refresh in `canvas-lms`'s SKILL.md handles expiry.
 
-Implement a lazy-refresh pattern:
+### 4. Sync course materials (optional)
 
-1. Read saved token from file
-2. Validate with `GET /api/v1/users/self` (check HTTP status only)
-3. If 200 → use token for API calls
-4. If 401 → run this script, capture `NEW_TOKEN=`, save to file, retry
-5. If script fails → alert user (password changed, CAPTCHA triggered, etc.)
+```bash
+cd ../../canvas-lms/scripts
+python3 sync_course_materials.py --dry-run     # preview the plan
+python3 sync_course_materials.py               # idempotent sync
+```
 
-## Adapting to Other Institutions
+The course library root defaults to `~/CanvasCourses`; override with `--lib` or `$CANVAS_LIB`.
+`COURSES` / `ASSIGN_DEST` are hardcoded per semester — update them each term.
 
-The IDP flow is based on a common CAS pattern used by many Chinese universities:
+## Security
 
-1. Change URLs in `.env` (`ELEARNING_ENTRY_URL`, `ELEARNING_IDP_BASE_URL`, `ELEARNING_ENTITY_ID`)
-2. Test with `--dry-run --debug` to verify lck/authChainCode extraction
-3. If auth methods differ: modify `pick_auth_chain_code()` in `auth_session.py`
-4. If encryption differs: modify `encrypt_password_rsa()` and `parse_public_key_payload()`
-
-Tested with: **Fudan University** (`id.fudan.edu.cn` → `elearning.fudan.edu.cn`).
-
-## Troubleshooting
-
-Run with `--debug` to save artifacts to `debug_output/`:
-
-| Symptom | Check |
-|---|---|
-| `未能从入口响应中解析到 lck` | `entry_response.html` — look for `context_CAS_...` |
-| `queryAuthMethods 未找到 userAndPwd` | `query_auth_methods.json` — check `moduleCode` |
-| `未从 authExecute 提取到 loginToken` | `auth_execute.json` — check `code`/`message` |
-| `未拿到关键会话 Cookie` | Check for CAPTCHA, verify credentials |
-| Token API 401/422 | `cookies.txt` for `_csrf_token` / `_normandy_session` |
-| Cleanup fails | `cleanup_summary.json` for `failed` entries |
-
-## Security Notes
-
-- `.env` contains credentials — **never commit to git**
-- `debug_output/` may contain session data — **sanitize before sharing**
-- Password encrypted with server-provided RSA public key (PKCS1v1_5)
-- Tokens created with purpose label for safe lifecycle management
+- `.env` holds credentials — **never commit it** (already gitignored)
+- `debug_output/` contains **session cookies and a plaintext token** (`cookies.txt` / `create_token.json`) — gitignored; sanitize before sharing
+- The password is RSA-encrypted (PKCS1v1_5) with the key served by the IDP, matching the frontend JS
+- Tokens carry a purpose label; cleanup matches on purpose only, so manually created tokens survive
+- If the new token's id can't be determined, the script **refuses to clean up** and exits (avoids deleting every token with that purpose)
 
 ## Known Limitations
 
-- **CAPTCHA/Rate-limiting**: Cannot solve human verification — manual intervention required
-- **MFA/2FA**: Not supported (requires interactive flow)
-- **IDP interface changes**: May break if JSON fields or HTML structure change
-- **SAML 2.0 (non-CAS)**: Not directly supported
+| Limitation | Impact |
+|---|---|
+| CAPTCHA / rate limiting | Human verification can't be solved; manual intervention needed |
+| MFA / 2FA | Unsupported (`requests` can't drive an interactive flow) |
+| SAML 2.0 (non-CAS) | Not directly supported |
+| IDP interface / DOM changes | May break; diagnose with `--debug` and `diag_settings_tokens.py` |
+
+## Documentation
+
+- [Project background & use cases](docs/project-background.md) — Fudan eLearning architecture, typical scenarios, design rationale (Chinese)
+- [IDP adaptation guide](skills/canvas-lms-idp-auto-refresh/references/idp-adaptation.md) — step-by-step for other institutions (Chinese)
+
+Verified against **Fudan University** (`id.fudan.edu.cn` → `elearning.fudan.edu.cn`).
 
 ## License
 
 MIT
-
-## Acknowledgments
-
-Developed for automating Canvas LMS token lifecycle at Fudan University.
-Also available as an [OpenClaw skill](https://clawhub.com) (`canvas-lms-idp-auto-refresh`).

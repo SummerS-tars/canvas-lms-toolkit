@@ -155,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
                 token_body.get("purpose") or config.token_purpose
             )
             keep_token_id = str(token_body.get("id")) if token_body.get("id") is not None else None
+            if keep_token_id is None:
+                # 没有 keep id 时 cleanup 会删掉所有同 purpose 的 token（包括当前在用的）
+                LOGGER.error("未拿到新建 token 的 id，为避免误删所有 token，跳过清理。")
+                return 4
             cleanup_summary = token_manager.cleanup_old_tokens_by_purpose(
                 csrf_token=csrf_token,
                 purpose=cleanup_purpose,

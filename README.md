@@ -1,128 +1,116 @@
-# Canvas LMS IDP Token 自动刷新
+# Canvas LMS Toolkit
 
-通过模拟机构 IDP（CAS/SAML）登录流程，使用 RSA 加密凭据，自动刷新 Canvas LMS API Token。
+复旦 eLearning（Canvas LMS）自动化工具集 —— 两个配套的 [OpenClaw Skill](https://clawhub.com)，
+合起来覆盖 **「拿 token → 用 token」** 的完整闭环。
+
+- **认证**：绕过 SSO 会话过期，全自动轮换 API Token
+- **使用**：调 Canvas REST API 查作业 / 下课件 / 交作业，并一键同步整个学期的课程资料
 
 [English](README.en.md)
 
-## 概述
+---
 
-许多高校将 Canvas LMS 部署在机构 SSO（CAS/SAML）之后。通过 Canvas 设置页面手动生成的 API Token 可能每天或每次会话后被 SSO 层强制失效。本项目自动完成完整的登录链路，无需人工干预即可编程方式创建全新的 Canvas API Token。
+## 两个 Skill
 
-## 工作原理
+| Skill | 作用 | 触发场景 | 依赖 |
+|---|---|---|---|
+| [`canvas-lms-idp-auto-refresh`](skills/canvas-lms-idp-auto-refresh/) | **写**：模拟机构 IDP（CAS/SAML）登录，RSA 加密密码，创建/清理 API Token | token 过期、401/404、「自动刷新 token」、「elearning 登录」 | 需要 venv（`requests` / `beautifulsoup4` / `pycryptodome` / `python-dotenv`） |
+| [`canvas-lms`](skills/canvas-lms/) | **读**：Canvas API 用法 + 课程资料同步脚本 | 「查作业」「下载课件」「课程平台」「查截止日期」 | **零第三方依赖**（纯标准库） |
+
+两者是单向依赖：`canvas-lms` 在 token 失效时会调用 `canvas-lms-idp-auto-refresh` 的刷新脚本；
+后者完全不知道前者的存在。所以你可以只用其中一个。
+
+## 目录结构
 
 ```
-入口 URL → CAS/IDP（lck + authChainCode）→ RSA 加密密码 → authExecute
-  → loginToken（JWT）→ authnEngine → SSO ticket → Canvas 会话 → 创建 API Token
-  → （可选）按 purpose 删除旧 Token → 输出 NEW_TOKEN=xxx
+canvas-lms-toolkit/
+├── README.md / README.en.md
+├── LICENSE                       # MIT
+├── docs/
+│   └── project-background.md     # 复旦 eLearning 平台背景与典型场景
+└── skills/
+    ├── canvas-lms/
+    │   ├── SKILL.md
+    │   └── scripts/sync_course_materials.py
+    └── canvas-lms-idp-auto-refresh/
+        ├── SKILL.md
+        ├── references/idp-adaptation.md   # 适配其他高校的详细指南
+        └── scripts/
+            ├── elearning_login.py         # 主入口
+            ├── auth_session.py            # IDP 登录链
+            ├── token_ops.py               # Token 创建 / 清理
+            ├── diag_settings_tokens.py    # 只读诊断
+            ├── requirements.txt
+            └── .env.example
 ```
 
 ## 快速开始
 
+### 1. 安装到 OpenClaw
+
+把 `skills/` 下的两个目录放进你的 skills 目录（例如 `~/.openclaw/workspace/skills/`），
+然后在配置的 skills 白名单里加上它们，否则模型看不到。
+也可以直接 `cp -r skills/* <你的 skills 目录>/`。
+
+### 2. 配置凭据（仅 `canvas-lms-idp-auto-refresh` 需要）
+
 ```bash
-# 1. 创建虚拟环境
+cd skills/canvas-lms-idp-auto-refresh/scripts
 python3 -m venv .venv
-source .venv/bin/activate  # 或：.venv\Scripts\activate（Windows）
+.venv/bin/pip install -r requirements.txt
 
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 配置凭据
-cp .env.example .env
-# 编辑 .env，填入 ELEARNING_USERNAME 和 ELEARNING_PASSWORD
-
-# 4. 测试（dry-run —— 仅获取公钥，不执行登录）
-python elearning_login.py --dry-run --debug
-
-# 5. 完整流程：登录 → 创建 Token → 清理旧 Token
-python elearning_login.py --cleanup-old-tokens
+cp .env.example .env        # 填 ELEARNING_USERNAME / ELEARNING_PASSWORD
+chmod 600 .env
 ```
 
-成功后：`NEW_TOKEN=<token值>` 将输出到标准输出。
+### 3. 拿一个 token
 
-## 配置说明
+```bash
+# 先 dry-run 验证链路（只取公钥，不登录）
+.venv/bin/python elearning_login.py --dry-run --debug
 
-| 变量 | 是否必填 | 默认值 | 说明 |
-|---|---|---|---|
-| `ELEARNING_USERNAME` | ✅ | — | 学号/工号 |
-| `ELEARNING_PASSWORD` | ✅ | — | 密码 |
-| `ELEARNING_ENTRY_URL` | | `https://elearning.fudan.edu.cn/login/cas` | CAS 入口地址 |
-| `ELEARNING_IDP_BASE_URL` | | `https://id.fudan.edu.cn` | IDP 基础 URL |
-| `ELEARNING_ENTITY_ID` | | `https://elearning.fudan.edu.cn` | 服务提供方实体 ID |
-| `ELEARNING_TOKEN_PURPOSE` | | `OpenClaw Auto Refresh Token` | 创建 Token 的标签 |
-| `ELEARNING_CLEANUP_OLD_TOKENS` | | `0` | 自动删除同 purpose 的旧 Token |
-| `ELEARNING_TIMEOUT_SECONDS` | | `20` | 请求超时时间（秒） |
-
-## 命令行参数
-
-```
---debug               开启详细 HTTP 日志，并将调试文件保存至 debug_output/
---dry-run             只测试到获取公钥为止（不执行实际登录）
---skip-token          登录后跳过 Token 创建
---cleanup-old-tokens  创建新 Token 后，删除同 purpose 的旧 Token
---cleanup-purpose     覆盖清理时匹配的 purpose
---cleanup-dry-run     预览将被删除的 Token，不实际删除
---dump-dir            自定义调试输出目录（默认：debug_output/）
+# 正式：登录 → 创建 token → 清理同 purpose 旧 token
+.venv/bin/python elearning_login.py --cleanup-old-tokens
 ```
 
-## 与 Agent/工具集成
+成功时 stdout 输出 `NEW_TOKEN=<token值>`，把它写进 `~/.config/canvas-lms-token`。
+之后的懒刷新由 agent 按 `canvas-lms` 的 SKILL.md 自动处理。
 
-实现懒刷新（lazy-refresh）模式：
+### 4. 同步课程资料（可选）
 
-1. 从文件中读取已保存的 Token
-2. 通过 `GET /api/v1/users/self` 校验 Token（仅检查 HTTP 状态码）
-3. 返回 200 → 使用该 Token 进行 API 调用
-4. 返回 401 → 运行本脚本，捕获 `NEW_TOKEN=` 并保存到文件，重试
-5. 脚本失败 → 提醒用户（密码已更改、触发验证码等）
+```bash
+cd ../../canvas-lms/scripts
+python3 sync_course_materials.py --dry-run     # 先看计划
+python3 sync_course_materials.py               # 正式同步（幂等）
+```
 
-## 适配其他高校
+课程库根目录默认 `~/CanvasCourses`，可用 `--lib` 或 `$CANVAS_LIB` 覆盖。
+`COURSES` / `ASSIGN_DEST` 是按学期硬编码的，换学期要改。
 
-本 IDP 流程基于中国许多高校通用的 CAS 模式：
+## 安全
 
-1. 在 `.env` 中修改 URL（`ELEARNING_ENTRY_URL`、`ELEARNING_IDP_BASE_URL`、`ELEARNING_ENTITY_ID`）
-2. 使用 `--dry-run --debug` 验证 lck/authChainCode 提取是否正常
-3. 如认证方式不同：修改 `auth_session.py` 中的 `pick_auth_chain_code()`
-4. 如加密方式不同：修改 `encrypt_password_rsa()` 和 `parse_public_key_payload()`
-
-详细适配指南请参阅 [references/idp-adaptation.md](references/idp-adaptation.md)。
-
-已测试：**复旦大学**（`id.fudan.edu.cn` → `elearning.fudan.edu.cn`）。
-
-## 故障排查
-
-使用 `--debug` 将调试产物保存至 `debug_output/`：
-
-| 现象 | 检查项 |
-|---|---|
-| `未能从入口响应中解析到 lck` | `entry_response.html` —— 查找 `context_CAS_...` |
-| `queryAuthMethods 未找到 userAndPwd` | `query_auth_methods.json` —— 检查 `moduleCode` |
-| `未从 authExecute 提取到 loginToken` | `auth_execute.json` —— 检查 `code`/`message` |
-| `未拿到关键会话 Cookie` | 检查是否触发验证码，核实凭据是否正确 |
-| Token API 返回 401/422 | `cookies.txt` 中查找 `_csrf_token` / `_normandy_session` |
-| 清理失败 | `cleanup_summary.json` 中查找 `failed` 条目 |
-
-## 安全说明
-
-- `.env` 包含凭据 —— **切勿提交到 git**
-- `debug_output/` 可能包含会话数据 —— **分享前请清除敏感信息**
-- 密码使用服务器提供的 RSA 公钥进行 PKCS1v1_5 加密
-- Token 创建时带有 purpose 标签，便于安全的生命周期管理
+- `.env` 含凭据 —— **切勿提交**（已在 `.gitignore` 中）
+- `debug_output/` 会包含**会话 Cookie 和明文 Token**（`cookies.txt` / `create_token.json`）—— 已 gitignore，分享前也请自行清除
+- 密码在传输前用 IDP 提供的 RSA 公钥加密（PKCS1v1_5），与前端 JS 行为一致
+- Token 带 purpose 标签，清理只按 purpose 匹配，不会误删手动创建的 Token
+- 没有新 token id 时脚本会**拒绝清理**并退出（避免删光所有同 purpose token）
 
 ## 已知限制
 
-- **验证码/限流**：无法解决人机验证 —— 需要人工干预
-- **MFA/2FA**：不支持（需要交互式流程）
-- **IDP 接口变更**：若 JSON 字段或 HTML 结构发生变化，脚本可能失效
-- **SAML 2.0（非 CAS）**：不直接支持
+| 限制 | 影响 |
+|---|---|
+| 验证码 / 限流 | 无法处理人机验证，需人工介入 |
+| MFA / 2FA | 不支持（`requests` 无法做交互式流程） |
+| SAML 2.0（非 CAS） | 不直接支持 |
+| IDP 接口 / DOM 变更 | 可能失效；用 `--debug` 和 `diag_settings_tokens.py` 诊断 |
 
-## 补充文档
+## 文档
 
-- [项目背景与应用场景说明](docs/project-background.md) — 复旦 eLearning 平台架构背景、典型应用场景、技术选型说明
+- [项目背景与应用场景](docs/project-background.md) —— 复旦 eLearning 平台架构、典型用法、技术选型
+- [IDP 适配指南](skills/canvas-lms-idp-auto-refresh/references/idp-adaptation.md) —— 适配其他高校的逐步流程
+
+已在**复旦大学**（`id.fudan.edu.cn` → `elearning.fudan.edu.cn`）验证。
 
 ## 许可证
 
 MIT
-
-## 致谢
-
-本项目为复旦大学 Canvas LMS Token 生命周期自动化管理而开发。
-同时作为 [OpenClaw Skill](https://clawhub.com) 发布（`canvas-lms-idp-auto-refresh`）。
